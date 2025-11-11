@@ -7,10 +7,35 @@ import torch.nn as nn
 import os
 import pandas as pd
 from tqdm import tqdm
+from torch.optim.lr_scheduler import MultiStepLR # 导入调度器
 
 # 导入我们自己的模块
 from utils.evaluation import predict_full_sequence, evaluate_metrics
 import config
+
+def get_current_schedule(policy, values, current_epoch):
+    """
+    根据当前 epoch 从调度策略中动态获取值。
+
+    Args:
+        policy (list): 形如 [(epoch_milestone, value_index), ...] 的策略
+        values (list): 索引对应的值
+        current_epoch (int): 当前的外层 epoch (从 0 开始)
+
+    Returns:
+        对应的 value
+    """
+    current_value_index = 0
+    # 遍历策略，找到最后一个小于等于当前 epoch 的节点
+    for epoch_milestone, value_index in policy:
+        if current_epoch >= epoch_milestone:
+            current_value_index = value_index
+        else:
+            # 已经超过了当前 epoch，停止
+            break
+
+    return values[current_value_index]
+
 
 def train_one_epoch(model, loader, optimizer, loss_fn_spike, loss_fn_soma, loss_fn_dvt,
                     loss_weights, device, sub_epoch_idx):
@@ -82,12 +107,15 @@ def run_training_loop(model, optimizer, train_loader, validation_data, cfg, outp
     """
     print("--- 步骤 5: 开始复现训练循环 ---")
 
-    # 从 config.py 中获取调度表
+    # --- 从 config.py 中获取新策略 ---
     num_outer_epochs = cfg.TRAIN_CONFIG["NUM_EPOCHS"]
     num_sub_epochs = cfg.TRAIN_CONFIG["NUM_STEPS_MULTIPLIER"]
-    lr_schedule = cfg.TRAIN_CONFIG["LEARNING_RATE_SCHEDULE"]
-    batch_schedule = cfg.TRAIN_CONFIG["BATCH_SIZE_SCHEDULE"] # (注意：data_loader已用第一个BS初始化)
-    loss_weights_schedule = cfg.TRAIN_CONFIG["LOSS_WEIGHTS_SCHEDULE"]
+
+    # 获取策略定义
+    lr_policy = cfg.TRAIN_CONFIG["LR_POLICY"]
+    dynamic_policy = cfg.TRAIN_CONFIG["DYNAMIC_SCHEDULE_POLICY"]
+    loss_weight_values = cfg.TRAIN_CONFIG["LOSS_WEIGHT_VALUES"]
+    batch_size_values = cfg.TRAIN_CONFIG["BATCH_SIZE_VALUES"] # (注意: data_loader 仍使用第一个值)
 
     # 验证数据 (已在GPU上)
     val_X_full, val_Y_dict_full = validation_data
@@ -97,25 +125,44 @@ def run_training_loop(model, optimizer, train_loader, validation_data, cfg, outp
     loss_fn_soma = nn.MSELoss()
     loss_fn_dvt = nn.MSELoss() if cfg.DATA_CONFIG["DVT_PCA_COMPONENTS"] > 0 else None
 
+    # --- 初始化学习率调度器 ---
+    lr_scheduler = MultiStepLR(
+        optimizer,
+        milestones=lr_policy["MILESTONES"],
+        gamma=lr_policy["GAMMA"]
+    )
+
+    # 检查: 确保初始 LR 与优化器一致
+    # (AdamW 在 main_run.py 中已使用 INITIAL_LR 初始化)
+
     log_data = [] # 收集日志
     best_val_loss = float('inf')
 
-    # --- 外层循环 (250次) ---
+    # --- 外层循环 (现在可以灵活设置次数) ---
     # 对应原项目的 learning_schedule 循环
     for outer_epoch in range(num_outer_epochs):
 
         print(f"\n--- 外层 Epoch {outer_epoch+1}/{num_outer_epochs} ---")
 
-        # 1. 设置当前Epoch的参数
-        current_lr = lr_schedule[outer_epoch]
-        current_loss_weights = loss_weights_schedule[outer_epoch]
+        # 1. 动态获取当前Epoch的参数
 
-        # 动态更新优化器的学习率
-        for param_group in optimizer.param_groups:
-            param_group['lr'] = current_lr
+        # (注意: 批次大小在 data_loader 创建时已固定,
+        #  我们这里只是读取它以供未来使用或记录)
+        current_batch_size = get_current_schedule(
+            dynamic_policy, batch_size_values, outer_epoch
+        )
 
-        print(f"  > 设置 LR = {current_lr}")
-        print(f"  > 设置 Loss Weights (Spike, Soma, DVT) = {current_loss_weights}")
+        current_loss_weights = get_current_schedule(
+            dynamic_policy, loss_weight_values, outer_epoch
+        )
+
+        # 从调度器获取当前 LR (用于记录)
+        current_lr = lr_scheduler.get_last_lr()[0]
+
+        # (不再需要手动设置优化器 LR)
+        print(f"  > 当前 LR = {current_lr}")
+        print(f"  > 当前 Loss Weights (Spike, Soma, DVT) = {current_loss_weights}")
+        # print(f"  > (当前批次大小: {current_batch_size})") # (可选)
 
         # 累计子-epoch的训练损失
         train_losses = []
@@ -185,6 +232,10 @@ def run_training_loop(model, optimizer, train_loader, validation_data, cfg, outp
             save_path = os.path.join(output_dir, "best_model.pth")
             torch.save(model.state_dict(), save_path)
             print(f"  > 新的最佳模型（Val Loss: {best_val_loss:.6f}）。已保存到 {save_path}")
+
+        # --- 6. 更新学习率调度器 ---
+        # 在 epoch 循环的末尾调用 .step()
+        lr_scheduler.step()
 
     print("--- 训练循环已完成 ---")
 

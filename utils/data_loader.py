@@ -305,8 +305,9 @@ def get_data_loaders(cfg, output_dir):
     if Y_dvt_raw is not None:
         train_targets['dvt_pca'] = Y_dvt_train
 
-    # 计算每个“子-epoch”的步数
-    steps_per_sub_epoch = 100
+    # --- 修改：从 config.py 中读取 STEPS_PER_SUB_EPOCH ---
+    # (移除了硬编码的 steps_per_sub_epoch = 100)
+    steps_per_sub_epoch = cfg.TRAIN_CONFIG["STEPS_PER_SUB_EPOCH"]
 
     train_dataset = NeuronRandomWindowDataset(
         X_train,
@@ -317,7 +318,9 @@ def get_data_loaders(cfg, output_dir):
     )
 
     # 批次大小从调度中获取第一个值
-    batch_size = cfg.TRAIN_CONFIG["BATCH_SIZE_SCHEDULE"][0]
+    # (注意: 我们在问题1中已将调度改为策略，但 data_loader 仍然
+    #  只在初始化时读取一次批次大小，这是符合预期的。)
+    batch_size = cfg.TRAIN_CONFIG["BATCH_SIZE_VALUES"][0]
 
     train_loader = DataLoader(
         train_dataset,

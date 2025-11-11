@@ -228,10 +228,52 @@ def get_model(data_info, cfg):
 def get_optimizer(model, cfg):
     """
     设置优化器，并在此处应用L2正则化 (weight_decay)。
+
+    --- 修改 ---
+    根据最佳实践，将参数分为两组：
+    1. 应用 Weight Decay (L2 正则化) 的参数 (如 Conv 层的 weights)
+    2. 不应用 Weight Decay 的参数 (如 bias 和 BatchNorm 层的参数)
     """
-    lr = cfg.TRAIN_CONFIG["LEARNING_RATE_SCHEDULE"][0]
+    lr = cfg.TRAIN_CONFIG["LR_POLICY"]["INITIAL_LR"] # 从新的 LR_POLICY 获取
     weight_decay = cfg.MODEL_CONFIG["L2_REGULARIZATION"]
-    optimizer = optim.AdamW(model.parameters(), lr=lr, weight_decay=weight_decay)
+
+    decay_params = []
+    no_decay_params = []
+
+    for name, param in model.named_parameters():
+        if not param.requires_grad:
+            continue
+
+        # 检查是否为 Conv 层的 weight
+        # (在我们的模型中，主要是 'network.*.conv.weight' 和 'head_*.weight')
+        if 'conv.weight' in name or 'head' in name and 'weight' in name:
+            # 检查是否为 nn.Conv1d 的权重 (以防未来添加 nn.Linear)
+            if param.dim() > 1: # Conv1d 的 weight 是 3D, Linear 的 weight 是 2D
+                decay_params.append(param)
+            else:
+                # (可能是 Linear 层的 weight，但在此 TCN 模型中主要是 Conv1d)
+                decay_params.append(param)
+
+        # 检查是否为 bias 或 BatchNorm 参数
+        elif 'bias' in name:
+            no_decay_params.append(param)
+        elif 'bn' in name: # 对应 CausalConv1dLayer 中的 self.bn
+            no_decay_params.append(param)
+        else:
+            # 其他参数（以防万一），默认不衰减
+            no_decay_params.append(param)
+
+    # 创建两个参数组
+    optimizer_grouped_parameters = [
+        {'params': decay_params, 'weight_decay': weight_decay},
+        {'params': no_decay_params, 'weight_decay': 0.0}
+    ]
+
+    print("  > 优化器已设置：")
+    print(f"    - {len(decay_params)} 个参数组应用 L2 (wd={weight_decay})")
+    print(f"    - {len(no_decay_params)} 个参数组不应用 L2 (wd=0.0)")
+
+    optimizer = optim.AdamW(optimizer_grouped_parameters, lr=lr)
     return optimizer
 
 def save_test_results(results, output_dir):

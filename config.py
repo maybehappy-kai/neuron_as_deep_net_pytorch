@@ -63,50 +63,67 @@ MODEL_CONFIG = {
 
 # --- 4. 训练参数 ---
 # 严格复现原项目的学习调度
-NUM_EPOCHS = 250 # "外层" epoch 数量
+NUM_EPOCHS = 250 # "外层" epoch 数量 (现在可以灵活设置)
 NUM_STEPS_MULTIPLIER = 10 # 每个 "外层" epoch 包含的 "子-epoch" 数量
 
-# 学习率调度
-lr_schedule = [0.0001] * 40 + \
-              [0.00003] * 40 + \
-              [0.00001] * 40 + \
-              [0.000003] * 40 + \
-              [0.000001] * 90 # 总共 250
+# --- 学习率调度 (新) ---
+# 使用 PyTorch MultiStepLR 策略
+LR_POLICY = {
+    "INITIAL_LR": 0.0001,
+    # 原 Keras 衰减点: 40, 80, 120, 160
+    "MILESTONES": [40, 80, 120, 160],
+    # 原 Keras 衰减值: 0.00003, 0.00001, 0.000003, 0.000001
+    # 我们可以用 0.3 的 gamma 来近似 (0.3, 0.3, 0.3, 0.3)
+    "GAMMA": 0.3
+}
 
-# 批次大小调度
-batch_schedule = [8] * 250
+# --- 批次大小和损失权重的动态调度 (新) ---
+# 定义索引对应的具体值
+DVT_LOSS_MULT_FACTOR = 0.1
+LOSS_WEIGHT_VALUES = [
+    # 索引 0 (Epochs 0-39)
+    [1.0, 0.0200, DVT_LOSS_MULT_FACTOR * 0.00005],
+    # 索引 1 (Epochs 40-79)
+    [2.0, 0.0100, DVT_LOSS_MULT_FACTOR * 0.00003],
+    # 索引 2 (Epochs 80-119)
+    [4.0, 0.0100, DVT_LOSS_MULT_FACTOR * 0.00001],
+    # 索引 3 (Epochs 120-159)
+    [8.0, 0.0100, DVT_LOSS_MULT_FACTOR * 0.0000001],
+    # 索引 4 (Epochs 160+)
+    [9.0, 0.0030, DVT_LOSS_MULT_FACTOR * 0.00000001]
+]
 
-# 损失权重调度
-# (Spike, Soma, Dendritic)
-# 注意：DVT_LOSS_MULT_FACTOR (树突损失乘数)
-DVT_LOSS_MULT_FACTOR = 0.1 #
-loss_weights_schedule = [[1.0, 0.0200, DVT_LOSS_MULT_FACTOR * 0.00005]] * 40 + \
-                        [[2.0, 0.0100, DVT_LOSS_MULT_FACTOR * 0.00003]] * 40 + \
-                        [[4.0, 0.0100, DVT_LOSS_MULT_FACTOR * 0.00001]] * 40 + \
-                        [[8.0, 0.0100, DVT_LOSS_MULT_FACTOR * 0.0000001]] * 40 + \
-                        [[9.0, 0.0030, DVT_LOSS_MULT_FACTOR * 0.00000001]] * 90
+BATCH_SIZE_VALUES = [
+    # 索引 0 (默认)
+    8
+]
+
+# 定义策略：(Epoch 开始节点, 损失权重索引, 批次大小索引)
+DYNAMIC_SCHEDULE_POLICY = [
+    (0,   0, 0),
+    (40,  1, 0),
+    (80,  2, 0),
+    (120, 3, 0),
+    (160, 4, 0)
+]
 
 TRAIN_CONFIG = {
     "NUM_EPOCHS": NUM_EPOCHS,
     "NUM_STEPS_MULTIPLIER": NUM_STEPS_MULTIPLIER,
 
-    # 训练数据加载器
-    "FILES_PER_EPOCH_TRAIN": 6,   # 每个外层epoch加载的训练文件数
-    "FILE_LOAD_PER_EPOCH_TRAIN": 0.2, # 从每个文件中采样的比例
-
-    # 验证数据加载器
-    "FILES_PER_EPOCH_VALID": 1,   #
-    "FILE_LOAD_PER_EPOCH_VALID": 0.2, #
+    # --- 新增：将 "魔术数字" 100 移到此处 ---
+    "STEPS_PER_SUB_EPOCH": 100,
 
     # 窗口采样
     # 原项目在采样时忽略前500ms
     # 请根据您的时间步长手动缩放（例如 500ms / 0.02ms/步 = 25000 步）
     "IGNORE_TIME_FROM_START": 500, # (单位：时间步)
 
-    # 学习调度
-    "BATCH_SIZE_SCHEDULE": batch_schedule,
-    "LEARNING_RATE_SCHEDULE": lr_schedule,
-    "LOSS_WEIGHTS_SCHEDULE": loss_weights_schedule,
+    # --- 学习调度 (新) ---
+    "LR_POLICY": LR_POLICY,
+    "LOSS_WEIGHT_VALUES": LOSS_WEIGHT_VALUES,
+    "BATCH_SIZE_VALUES": BATCH_SIZE_VALUES,
+    "DYNAMIC_SCHEDULE_POLICY": DYNAMIC_SCHEDULE_POLICY,
 }
 
 # --- 5. 评估参数 ---

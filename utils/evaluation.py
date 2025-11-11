@@ -24,8 +24,8 @@ def get_optimal_threshold(y_true, y_pred_prob):
 @torch.no_grad() # 确保在评估期间不计算梯度
 def predict_full_sequence(model, X_full, cfg):
     """
-    在完整的长序列上执行 "Overlap-Add" 风格的预测。
-    复现 evaluate_CNN_test.py 中的预测逻辑。
+    在完整的长序列上执行 "Overlap-Splice" 风格的预测。
+    (已修改：根据用户反馈，实现“先写获胜”逻辑，而非“平均”)
 
     Args:
         model (nn.Module): TCN模型。
@@ -55,7 +55,8 @@ def predict_full_sequence(model, X_full, cfg):
     if has_dvt:
         pred_dvt = torch.zeros((total_len, cfg.DATA_CONFIG["DVT_PCA_COMPONENTS"]), device=device)
 
-    # 我们需要一个计数器，以正确平均重叠区域
+    # --- 修改 ---
+    # overlap_counter 现在用作“写入锁” (0 = 可写, 1 = 已写入)
     overlap_counter = torch.zeros((total_len, 1), device=device)
 
     # --- 使用与原项目TCN的 "overlap_size" 相似的逻辑 ---
@@ -81,24 +82,40 @@ def predict_full_sequence(model, X_full, cfg):
         # 模型推理
         spike_logits, soma, dvt = model(batch_X)
 
-        # 将结果添加回完整张量
+        # --- 修改：实现 "Overlap-Splice" (先写获胜) 逻辑 ---
         for j, start_idx in enumerate(batch_starts):
             end_idx = start_idx + window_size
 
+            # 1. 确定哪些位置是 "可写" 的 (即 counter == 0)
+            # mask: (T_window, 1)
+            mask = (overlap_counter[start_idx:end_idx] == 0).float()
+
+            # 2. 获取当前窗口的预测
             # (1, T) -> (T, 1)
-            pred_spike_logits[start_idx:end_idx] += spike_logits[j].permute(1, 0)
-            pred_soma[start_idx:end_idx] += soma[j].permute(1, 0)
+            spike_logits_j = spike_logits[j].permute(1, 0)
+            soma_j = soma[j].permute(1, 0)
+
+            # 3. 仅在 "可写" 位置上写入
+            # (因为 pred_* 初始值为 0, 使用加法 + mask 等效于选择性写入)
+            pred_spike_logits[start_idx:end_idx] += spike_logits_j * mask
+            pred_soma[start_idx:end_idx] += soma_j * mask
+
             if has_dvt:
                 # (DVT_C, T) -> (T, DVT_C)
-                pred_dvt[start_idx:end_idx] += dvt[j].permute(1, 0)
+                dvt_j = dvt[j].permute(1, 0)
+                # (T_window, DVT_C) * (T_window, 1) -> 广播
+                pred_dvt[start_idx:end_idx] += dvt_j * mask
 
-            overlap_counter[start_idx:end_idx] += 1
+            # 4. 标记已写入的位置
+            # (注意: 我们不能使用 'overlap_counter[start_idx:end_idx] = mask'
+            #  因为 mask 只在重叠区的前半部分为 0, 后半部分为 1,
+            #  我们需要的是将新写入的区域标记为 1)
+            overlap_counter[start_idx:end_idx] += mask # (0+1=1, 1+0=1)
 
-    # 对重叠区域取平均
-    pred_spike_logits /= overlap_counter
-    pred_soma /= overlap_counter
-    if has_dvt:
-        pred_dvt /= overlap_counter
+    # --- 移除：不再需要平均步骤 ---
+    # pred_spike_logits /= overlap_counter (已删除)
+    # pred_soma /= overlap_counter (已删除)
+    # if has_dvt: ... (已删除)
 
     predictions = {
         'spike_logits': pred_spike_logits,

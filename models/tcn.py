@@ -36,7 +36,8 @@ class CausalConv1dLayer(nn.Module):
     一个包含 因果卷积 + BN + 激活 的TCN层。
     复现 Keras (padding='causal')
     """
-    def __init__(self, in_channels, out_channels, kernel_size, activation_fn, initializer_stddev, l2_reg):
+    # --- 修改：移除了未使用的 l2_reg 参数 ---
+    def __init__(self, in_channels, out_channels, kernel_size, activation_fn, initializer_stddev):
         super(CausalConv1dLayer, self).__init__()
 
         # 计算因果填充量 (只在左侧)
