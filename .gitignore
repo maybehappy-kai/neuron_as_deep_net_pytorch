@@ -1,0 +1,36 @@
+# Python 缓存
+__pycache__/
+*.pyc
+*.pyo
+*.pyd
+
+# Conda 和 Venv 环境
+# (假设您的环境不在项目目录内，但以防万一)
+venv/
+env/
+neuron_env/
+.env
+
+# IDE / 操作系统特定文件
+.vscode/
+.idea/
+.DS_Store
+*.ipynb_checkpoints
+
+# 依赖和构建
+build/
+dist/
+*.egg-info/
+
+# --- 项目特定 ---
+
+# 1. 忽略所有数据文件
+data/
+
+# 2. 忽略所有实验结果 (模型、日志、图表)
+results/
+
+# 3. 忽略数据预处理器
+# (我们将在 main_run.py 中创建它们)
+*.pkl
+
