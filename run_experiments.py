@@ -1,0 +1,130 @@
+import subprocess
+import os
+import time
+from queue import Queue, Empty
+import itertools
+
+# --- 1. 定义要并行使用的 GPU ---
+# 根据您的要求，使用 GPU 0, 1, 2, 3
+AVAILABLE_GPUS = [0, 1, 2, 3]
+
+# --- 2. 定义参数网格 ---
+# 这是您想要运行的所有实验组合。
+# 我根据原论文图4B 和 fit_CNN.py 的示例创建了一个网格。
+# 您需要修改这里来定义完整的 137+ 次运行。
+
+PARAM_GRID = {
+    'tcn_depth': [1, 2, 3, 4, 5, 6, 7, 8],
+    'tcn_width': [32, 64, 128, 256],
+    'tcn_kernel_first': [54], # 固定第一层核大小
+    'tcn_kernel_rest': [24]   # 固定剩余层核大小
+}
+
+# --- 3. 固定的参数 ---
+# 您要求的 --data_subdir
+DATA_SUBDIR = '1ms'
+BASE_COMMAND = ['python', 'main_run.py', '--data_subdir', DATA_SUBDIR]
+
+def main():
+    # 创建工作队列和 GPU 队列
+    job_queue = Queue()
+    gpu_queue = Queue()
+
+    # 填充 GPU 队列
+    for gpu_id in AVAILABLE_GPUS:
+        gpu_queue.put(gpu_id)
+
+    # 生成所有参数组合
+    keys, values = zip(*PARAM_GRID.items())
+    experiments = [dict(zip(keys, v)) for v in itertools.product(*values)]
+
+    # 填充工作队列
+    for i, params in enumerate(experiments):
+        job_queue.put({'id': i, 'params': params})
+
+    print(f"--- 实验总控脚本 ---")
+    print(f"已将 {len(experiments)} 个实验任务加入队列。")
+    print(f"将使用 {len(AVAILABLE_GPUS)} 个 GPU 进行并行处理: {AVAILABLE_GPUS}")
+
+    running_processes = {} # 字典，用于存储 {gpu_id: (process, job)}
+    tasks_completed = 0
+    total_tasks = len(experiments)
+
+    try:
+        while tasks_completed < total_tasks:
+            # --- 步骤 A: 检查已完成的进程 ---
+            finished_gpus = []
+            for gpu_id, (proc, job) in running_processes.items():
+                if proc.poll() is not None: # 进程已结束
+                    if proc.returncode == 0:
+                        print(f"[GPU {gpu_id}] 任务 {job['id']} (Depth={job['params']['tcn_depth']}, Width={job['params']['tcn_width']}) 已成功完成。")
+                    else:
+                        print(f"[GPU {gpu_id}] [警告] 任务 {job['id']} 失败，返回码: {proc.returncode}。")
+
+                    finished_gpus.append(gpu_id)
+                    tasks_completed += 1
+
+            # 将已完成的 GPU 归还到队列
+            for gpu_id in finished_gpus:
+                del running_processes[gpu_id]
+                gpu_queue.put(gpu_id)
+
+            # --- 步骤 B: 启动新任务 ---
+            while not gpu_queue.empty() and not job_queue.empty():
+                try:
+                    gpu_id = gpu_queue.get_nowait()
+                    job = job_queue.get_nowait()
+
+                    # 构建命令行
+                    cmd = BASE_COMMAND.copy()
+                    for key, value in job['params'].items():
+                        cmd.append(f"--{key}")
+                        cmd.append(str(value))
+
+                    # 设置此子进程专用的 GPU
+                    env = os.environ.copy()
+                    env['CUDA_VISIBLE_DEVICES'] = str(gpu_id)
+
+                    print(f"[GPU {gpu_id}] 启动任务 {job['id']}/{total_tasks}: {' '.join(cmd[2:])}")
+
+                    # 启动子进程
+                    # 我们将 stdout 和 stderr 重定向到日志文件，以避免终端混乱
+                    log_filename = f"logs_job_{job['id']}_D{job['params']['tcn_depth']}_W{job['params']['tcn_width']}.log"
+                    with open(log_filename, 'w') as log_file:
+                        proc = subprocess.Popen(cmd, env=env, stdout=log_file, stderr=subprocess.STDOUT)
+
+                    running_processes[gpu_id] = (proc, job)
+
+                except Empty:
+                    # 队列为空，跳出内部循环
+                    break
+                except Exception as e:
+                    print(f"启动任务时出错: {e}")
+                    # 如果启动失败，把 GPU 还回去
+                    if 'gpu_id' in locals():
+                        gpu_queue.put(gpu_id)
+
+            # --- 步骤 C: 轮询间隔 ---
+            time.sleep(10) # 每 10 秒检查一次进程状态
+
+    except KeyboardInterrupt:
+        print("\n--- 收到终止信号 ---")
+        print("正在终止所有正在运行的子进程...")
+        for gpu_id, (proc, job) in running_processes.items():
+            print(f"正在终止 [GPU {gpu_id}] 上的任务 {job['id']}...")
+            proc.terminate()
+            try:
+                proc.wait(timeout=10)
+            except subprocess.TimeoutExpired:
+                proc.kill()
+        print("所有子进程已终止。")
+
+    print(f"\n--- 所有 {total_tasks} 个实验任务已完成 ---")
+
+if __name__ == "__main__":
+    # 创建一个目录来存放日志，如果它不存在的话
+    if not os.path.exists("logs_grid_search"):
+        os.makedirs("logs_grid_search")
+    os.chdir("logs_grid_search") # 将日志文件放入子目录
+
+    main()

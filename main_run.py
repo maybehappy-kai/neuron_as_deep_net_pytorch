@@ -79,9 +79,8 @@ def update_config_with_args(cfg_module, args):
     # 1. 更新数据集路径
     if args.data_subdir:
         print(f"  > [配置覆盖] 使用数据集子目录: {args.data_subdir}")
-        # 从原始路径中获取文件名 (例如 'spike_matrix_0.02.npy')
-        input_filename = os.path.basename(cfg_module.DATA_CONFIG["INPUT_FILE_PATH"])
-        target_filename = os.path.basename(cfg_module.DATA_CONFIG["TARGET_FILE_PATH"])
+        input_filename = "spike_matrix.npy"
+        target_filename = "V_soma.npy"
 
         # 构建新路径
         cfg_module.DATA_CONFIG["INPUT_FILE_PATH"] = os.path.join("data", args.data_subdir, input_filename)
@@ -140,7 +139,7 @@ def setup_experiment_directory(cfg):
 
     # 从配置中提取关键参数用于命名
     model_name = cfg.MODEL_CONFIG["MODEL_NAME"]
-    lr_initial = cfg.TRAIN_CONFIG["LEARNING_RATE_SCHEDULE"][0]
+    lr_initial = cfg.TRAIN_CONFIG["LR_POLICY"]["INITIAL_LR"]
     window_size = cfg.MODEL_CONFIG["INPUT_WINDOW_SIZE"]
 
     # 提取数据子目录
@@ -296,7 +295,7 @@ def save_test_results(results, output_dir):
     print(f"  > 最终测试指标已保存到 {save_path}")
 
 # --- 修改此函数 ---
-def run_visualizations(model, test_data, test_results, data_info, cfg, plots_dir):
+def run_visualizations(model, test_data, test_results, data_info, cfg, plots_dir, full_data=None):
     """
     调用 visualization.py 中的所有绘图函数。
     """
@@ -340,44 +339,48 @@ def run_visualizations(model, test_data, test_results, data_info, cfg, plots_dir
     )
     print(f"  > 已保存: prediction_trace_test_set.png")
 
-    # --- 3b. 修改： 6秒切片逻辑 ---
+    # --- 3b. 6秒切片 (新逻辑：必须包含一个脉冲) ---
     slice_seconds = cfg.EVAL_CONFIG["VISUALIZATION_SLICE_SECONDS"]
     slice_steps = int(slice_seconds * 1000 / time_step_ms)
 
+    start_idx = 0 # 默认
+
+    # 1. 查找所有脉冲
+    spike_indices = np.where(y_true_spike_cpu > 0.5)[0]
+
     if total_steps < slice_steps:
-        # --- 1. 如果总步数连6秒都不够 ---
         print(f"  > [警告] 测试集总步数 ({total_steps}) 不足以切片 {slice_seconds}s ({slice_steps} 步)。")
         print(f"  > 已跳过 6s 切片可视化。")
+        slice_steps = 0 # 标记为跳过
 
-    else:
-        # --- 2. 总步数足够6秒 ---
-
-        # 检查从25%处开始是否安全
+    elif len(spike_indices) == 0:
+        print(f"  > [警告] 6s 切片：在测试集中未找到脉冲。回退到从 25% 处开始切片。")
         potential_start_idx = total_steps // 4
         if potential_start_idx + slice_steps <= total_steps:
-            # 安全：使用 25% 规则
             start_idx = potential_start_idx
-            print(f"  > 6s 切片：从 25% 处开始 (第 {start_idx} 步)。")
-        else:
-            # 不安全：取消限制，从 0 开始
-            start_idx = 0
-            print(f"  > 6s 切片：从 25% 处开始会越界，已改为从 0 处开始。")
+        # else: start_idx 保持为 0
 
+    else:
+        # 2. 找到了脉冲，选择一个并居中
+        chosen_spike_idx = np.random.choice(spike_indices)
+        start_idx = max(0, chosen_spike_idx - (slice_steps // 2))
+
+        # 3. 确保切片不会越过结尾
+        if start_idx + slice_steps > total_steps:
+            start_idx = total_steps - slice_steps
+
+        print(f"  > 6s 切片：在第 {chosen_spike_idx} 步找到脉冲。切片从 {start_idx} 步开始。")
+
+    # 4. 仅在 slice_steps > 0 时绘图
+    if slice_steps > 0:
         end_idx = start_idx + slice_steps
 
-        # 3. 缩放范围现在基于安全的 start_idx
-        # (确保缩放范围本身也在切片内)
+        # 缩放范围逻辑
         zoom_start_idx_rel = slice_steps // 3
         zoom_end_idx_rel = 2 * slice_steps // 3
-
-        # 确保 time_axis_s[start_idx + ...] 不会越界 (虽然在 'else' 分支中不应该发生)
-        if start_idx + zoom_end_idx_rel < len(time_axis_s):
-            zoom_start_s = time_axis_s[start_idx + zoom_start_idx_rel]
-            zoom_end_s = time_axis_s[start_idx + zoom_end_idx_rel]
-            zoom_range_s = (zoom_start_s, zoom_end_s)
-        else:
-            # 如果出现意外，取消缩放
-            zoom_range_s = None
+        zoom_start_s = time_axis_s[start_idx + zoom_start_idx_rel]
+        zoom_end_s = time_axis_s[start_idx + zoom_end_idx_rel]
+        zoom_range_s = (zoom_start_s, zoom_end_s)
 
         visualization.plot_prediction_trace(
             y_true_soma_cpu[start_idx:end_idx],
@@ -403,6 +406,35 @@ def run_visualizations(model, test_data, test_results, data_info, cfg, plots_dir
             save_path=os.path.join(plots_dir, "tcn_kernels.png")
         )
         print(f"  > 已保存: tcn_kernels.png")
+
+    # --- 5. 绘制完整数据集轨迹 (新) ---
+    if full_data:
+        print("  > 正在为完整数据集(Train+Val+Test)生成预测...")
+        X_full_all, Y_full_all_dict = full_data
+
+        # 运行预测
+        full_predictions = evaluation.predict_full_sequence(model, X_full_all, cfg)
+
+        # 准备Numpy数组 (注意：Y中的soma已减去偏置，这里加回来)
+        full_true_soma_cpu = Y_full_all_dict['soma'].cpu().numpy().ravel() + soma_bias
+        full_pred_soma_cpu = full_predictions['soma'].cpu().numpy().ravel() + soma_bias
+        full_true_spike_cpu = Y_full_all_dict['spike'].cpu().numpy().ravel()
+
+        full_pred_prob_cpu = torch.sigmoid(full_predictions['spike_logits']).cpu().numpy().ravel()
+        # 注意: 我们使用 'test_results' 中的阈值，因为它是基于模型性能计算的
+        full_pred_spike_binary_cpu = (full_pred_prob_cpu >= optimal_threshold).astype(int)
+
+        full_total_steps = len(full_true_soma_cpu)
+        full_time_axis_s = np.arange(full_total_steps) * (time_step_ms / 1000.0)
+
+        visualization.plot_prediction_trace(
+            full_true_soma_cpu, full_pred_soma_cpu,
+            full_true_spike_cpu, full_pred_spike_binary_cpu,
+            full_time_axis_s,
+            title="Prediction vs. Ground Truth (Full Dataset: Train+Val+Test)",
+            save_path=os.path.join(plots_dir, "prediction_trace_full_dataset.png")
+        )
+        print(f"  > 已保存: prediction_trace_full_dataset.png")
 
 def main():
     start_time = time.time()
@@ -452,7 +484,7 @@ def main():
     test_predictions = evaluation.predict_full_sequence(model, test_X_full, config)
 
     # 计算指标
-    final_loss_weights = config.TRAIN_CONFIG["LOSS_WEIGHTS_SCHEDULE"][-1]
+    final_loss_weights = config.TRAIN_CONFIG["LOSS_WEIGHT_VALUES"][-1]
     test_results = evaluation.evaluate_metrics(test_predictions, test_Y_dict_full, final_loss_weights, config)
 
     print("--- 步骤 7: 最终测试集结果 ---")
@@ -468,7 +500,45 @@ def main():
     save_test_results(test_results, output_dir)
 
     # --- 6. 生成所有可视化图表 ---
-    run_visualizations(model, test_data, test_results, data_info, config, plots_dir)
+    # --- START: 新增代码，用于拼接完整数据集 ---
+    print("--- 步骤 7b: 准备完整数据集以进行最终可视化 ---")
+    # 1. 从 train_loader 中提取 (T, C) 和 (T, 1) 的 CPU 张量
+    X_train_tensor_cpu = train_loader.dataset.X
+    Y_soma_train_tensor_cpu = train_loader.dataset.Y_soma
+    Y_spike_train_tensor_cpu = train_loader.dataset.Y_spike
+
+    # 2. 从 val_data 和 test_data 中获取 GPU 张量
+    X_val_tensor, Y_val_dict = val_data
+    # test_data 已经在前面被解包 (test_X_full, test_Y_dict_full)
+
+    # 3. 将训练数据移动到 GPU
+    X_train_tensor_gpu = X_train_tensor_cpu.to(config.DEVICE)
+    Y_soma_train_tensor_gpu = Y_soma_train_tensor_cpu.to(config.DEVICE)
+    Y_spike_train_tensor_gpu = Y_spike_train_tensor_cpu.to(config.DEVICE)
+
+    # 4. 拼接所有数据 (T, C)
+    X_full_dataset = torch.cat((X_train_tensor_gpu, X_val_tensor, test_X_full), dim=0)
+    # 拼接 (T, 1)
+    Y_soma_full_dataset = torch.cat((Y_soma_train_tensor_gpu, Y_val_dict['soma'], test_Y_dict_full['soma']), dim=0)
+    Y_spike_full_dataset = torch.cat((Y_spike_train_tensor_gpu, Y_val_dict['spike'], test_Y_dict_full['spike']), dim=0)
+
+    Y_full_dict = {
+        'soma': Y_soma_full_dataset,
+        'spike': Y_spike_full_dataset
+    }
+    # (如果 DVT 存在，也需要拼接 DVT)
+    if data_info["dvt_channels"] > 0:
+        Y_dvt_train_tensor_cpu = train_loader.dataset.Y_dvt
+        Y_dvt_train_tensor_gpu = Y_dvt_train_tensor_cpu.to(config.DEVICE)
+        Y_dvt_full_dataset = torch.cat((Y_dvt_train_tensor_gpu, Y_val_dict['dvt_pca'], test_Y_dict_full['dvt_pca']), dim=0)
+        Y_full_dict['dvt_pca'] = Y_dvt_full_dataset
+
+    full_data = (X_full_dataset, Y_full_dict)
+    print(f"  > 完整数据集已拼接 (总步数: {X_full_dataset.shape[0]})")
+    # --- END: 新增代码 ---
+
+    # 修改第 470 行的函数调用
+    run_visualizations(model, test_data, test_results, data_info, config, plots_dir, full_data)
 
     end_time = time.time()
     print(f"\n--- 完整运行已结束 ---")

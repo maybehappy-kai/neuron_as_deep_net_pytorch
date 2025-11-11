@@ -120,8 +120,7 @@ class TCN(nn.Module):
                     out_channels,
                     kernel_size,
                     activation_fn,
-                    initializer_stddev=cfg.MODEL_CONFIG["INITIALIZER_STDDEV"],
-                    l2_reg=cfg.MODEL_CONFIG["L2_REGULARIZATION"] # L2正则化稍后添加到优化器
+                    initializer_stddev=cfg.MODEL_CONFIG["INITIALIZER_STDDEV"]
                 )
             )
             in_channels = out_channels

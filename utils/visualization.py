@@ -108,8 +108,9 @@ def plot_prediction_trace(y_true_soma, y_pred_soma, y_true_spike, y_pred_spike_b
         ax_zoom.set_xlim(zoom_start_s, zoom_end_s)
 
         # 计算Y轴范围
-        start_idx = int(zoom_start_s * 1000 / time_step_ms)
-        end_idx = int(zoom_end_s * 1000 / time_step_ms)
+        # 将绝对时间 (zoom_start_s) 转换回相对于传入数组 (time_axis_s) 的索引
+        start_idx = int((zoom_start_s - time_axis_s[0]) * 1000 / time_step_ms)
+        end_idx = int((zoom_end_s - time_axis_s[0]) * 1000 / time_step_ms)
         min_val = min(y_true_soma[start_idx:end_idx].min(), y_pred_soma[start_idx:end_idx].min())
         ax_zoom.set_ylim(min_val - 5, -45) # 稍微低于最小值，最高到-45mV
 

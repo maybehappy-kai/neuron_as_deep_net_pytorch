@@ -13,7 +13,7 @@ from torch.optim.lr_scheduler import MultiStepLR # 导入调度器
 from utils.evaluation import predict_full_sequence, evaluate_metrics
 import config
 
-def get_current_schedule(policy, values, current_epoch):
+def get_current_schedule(policy, values, current_epoch, index_in_policy):
     """
     根据当前 epoch 从调度策略中动态获取值。
 
@@ -27,7 +27,10 @@ def get_current_schedule(policy, values, current_epoch):
     """
     current_value_index = 0
     # 遍历策略，找到最后一个小于等于当前 epoch 的节点
-    for epoch_milestone, value_index in policy:
+    for policy_entry in policy:
+        epoch_milestone = policy_entry[0]
+        value_index = policy_entry[index_in_policy] # 从 (epoch, loss_idx, batch_idx) 中选择
+
         if current_epoch >= epoch_milestone:
             current_value_index = value_index
         else:
@@ -149,11 +152,11 @@ def run_training_loop(model, optimizer, train_loader, validation_data, cfg, outp
         # (注意: 批次大小在 data_loader 创建时已固定,
         #  我们这里只是读取它以供未来使用或记录)
         current_batch_size = get_current_schedule(
-            dynamic_policy, batch_size_values, outer_epoch
+            dynamic_policy, batch_size_values, outer_epoch, index_in_policy=2
         )
 
         current_loss_weights = get_current_schedule(
-            dynamic_policy, loss_weight_values, outer_epoch
+            dynamic_policy, loss_weight_values, outer_epoch, index_in_policy=1
         )
 
         # 从调度器获取当前 LR (用于记录)

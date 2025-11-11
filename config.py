@@ -95,7 +95,7 @@ LOSS_WEIGHT_VALUES = [
 
 BATCH_SIZE_VALUES = [
     # 索引 0 (默认)
-    8
+    512
 ]
 
 # 定义策略：(Epoch 开始节点, 损失权重索引, 批次大小索引)

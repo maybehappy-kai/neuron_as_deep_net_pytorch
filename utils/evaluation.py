@@ -19,7 +19,7 @@ def get_optimal_threshold(y_true, y_pred_prob):
     optimal_idx = np.argmax(tpr - fpr)
     optimal_threshold = thresholds[optimal_idx]
 
-    return optimal_threshold, fpr, tpr
+    return optimal_threshold, (fpr, tpr, thresholds)
 
 @torch.no_grad() # 确保在评估期间不计算梯度
 def predict_full_sequence(model, X_full, cfg):
@@ -206,7 +206,7 @@ def evaluate_metrics(predictions, targets, loss_weights, cfg):
         results['spike_AUC'] = 0.5 # 以防万一数据中没有脉冲
 
     # 4b. 最佳阈值, P, R, F1
-    optimal_threshold, fpr, tpr = get_optimal_threshold(true_spike_cpu, pred_spike_prob_cpu)
+    optimal_threshold, roc_data_tuple = get_optimal_threshold(true_spike_cpu, pred_spike_prob_cpu)
 
     results['spike_optimal_threshold'] = optimal_threshold
 
@@ -225,6 +225,6 @@ def evaluate_metrics(predictions, targets, loss_weights, cfg):
     results['spike_F1'] = f1
 
     # 保存ROC曲线数据以供绘图
-    results['roc_curve_data'] = (fpr, tpr)
+    results['roc_curve_data'] = roc_data_tuple
 
     return results
