@@ -59,11 +59,24 @@ def predict_full_sequence(model, X_full, cfg):
     # overlap_counter 现在用作“写入锁” (0 = 可写, 1 = 已写入)
     overlap_counter = torch.zeros((total_len, 1), device=device)
 
-    # --- 使用与原项目TCN的 "overlap_size" 相似的逻辑 ---
-    # 原项目使用 (filter_sizes - 1).sum() + 1 作为感受野 (RF)
-    # 严格来说，原项目的 overlap_size 被设置为 150 或 250
-    # 我们这里使用一个固定的步长（stride）来进行重叠
-    stride = window_size // 2 # 50% 重叠
+    # --- 开始替换 ---
+    # 从 config 中获取模型架构
+    filter_sizes = np.array(cfg.MODEL_CONFIG["FILTER_SIZES"])
+    input_window_size = cfg.MODEL_CONFIG["INPUT_WINDOW_SIZE"]
+
+    # 1. 计算 Keras 版本中的 "time_window_T" (模型的感受野)
+    #    (来自 main_figure_replication.py)
+    time_window_T = (filter_sizes - 1).sum() + 1
+
+    # 2. 计算 Keras 版本中的 "overlap_size"
+    #    (来自 main_figure_replication.py)
+    overlap_size = min(max(time_window_T + 1, min(150, input_window_size - 50)), 250)
+
+    # 3. Keras 版本的有效步长 (stride) 是窗口大小减去重叠部分
+    stride = input_window_size - overlap_size
+
+    print(f"  > [动态步长] time_window_T: {time_window_T}, overlap_size: {overlap_size}, stride: {stride}")
+    # --- 结束替换 ---
 
     # 创建批次起始点
     start_indices = list(range(0, total_len - window_size + 1, stride))

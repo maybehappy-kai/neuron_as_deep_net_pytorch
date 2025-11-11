@@ -29,7 +29,7 @@ DATA_CONFIG = {
 
     # 预处理 (树突电压)
     # 注意：如果您的 V_soma.npy 中没有树突通道，请将此设置为 0
-    "DVT_PCA_COMPONENTS": 0, # 20, # 原项目NMDA使用20
+    "DVT_PCA_COMPONENTS": 20, # 20, # 原项目NMDA使用20
     "DVT_THRESHOLD": 3.0, # PCA成分的截断阈值
 }
 

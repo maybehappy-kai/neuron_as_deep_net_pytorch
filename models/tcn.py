@@ -60,12 +60,9 @@ class CausalConv1dLayer(nn.Module):
         # --- 初始化 ---
         # 复现 Keras Conv1D 初始化
         truncated_normal_(self.conv.weight, std=initializer_stddev)
-        # 第一层使用0.1偏置 (Keras默认为0)
-        # PyTorch Conv1d 默认初始化偏置，我们重新设置它
-        if in_channels == 1278: # 假设一个标识（或者传入is_first_layer=True）
-            nn.init.constant_(self.conv.bias, 0.1)
-        else:
-            nn.init.constant_(self.conv.bias, 0.0) # Keras Conv1D 默认
+
+        # 匹配 Keras Conv1D 默认的 'zeros' 偏置初始化
+        nn.init.constant_(self.conv.bias, 0.0)
 
     def forward(self, x):
         """
