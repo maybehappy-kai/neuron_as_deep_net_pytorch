@@ -5,6 +5,7 @@ import torch
 import numpy as np
 import joblib
 import os
+import json
 from torch.utils.data import Dataset, DataLoader
 from sklearn.preprocessing import StandardScaler
 from sklearn.decomposition import PCA
@@ -31,7 +32,7 @@ def find_local_maxima_with_threshold(v_soma, threshold):
 
     local_maxima = np.logical_and(rising_before, falling_after)
 
-    # 最终的脉冲是两者的交集
+    # 最终的脉冲是两者交集
     spikes_binary = np.logical_and(above_threshold, local_maxima)
 
     print(f"  > 检测到 {np.sum(spikes_binary)} 个脉冲。")
@@ -121,8 +122,40 @@ def get_data_loaders(cfg, output_dir):
     加载、预处理、划分数据，并返回PyTorch DataLoaders和评估数据。
     """
     print("--- 步骤 1: 加载原始数据 ---")
-    X_raw = np.load(cfg.DATA_CONFIG["INPUT_FILE_PATH"])
-    Y_raw = np.load(cfg.DATA_CONFIG["TARGET_FILE_PATH"])
+
+    # --- 使用 config 中的路径加载 ---
+    input_path = cfg.DATA_CONFIG["INPUT_FILE_PATH"]
+    target_path = cfg.DATA_CONFIG["TARGET_FILE_PATH"]
+
+    if not os.path.exists(input_path) or not os.path.exists(target_path):
+        print(f"[错误] 数据文件未找到。")
+        print(f"  - 尝试加载: {input_path}")
+        print(f"  - 尝试加载: {target_path}")
+        raise FileNotFoundError("请确保 config.py 中的路径正确，或者通过 --data_subdir 提供了正确的子目录。")
+
+    X_raw = np.load(input_path)
+    Y_raw = np.load(target_path)
+
+    # --- 加载通道类型信息 ---
+    data_dir = os.path.dirname(input_path)
+    channel_info_path = os.path.join(data_dir, "channel_info.json")
+    exc_indices = None
+    inh_indices = None
+
+    try:
+        with open(channel_info_path, 'r') as f:
+            channel_info = json.load(f)
+            exc_indices = channel_info.get('exc_indices', [])
+            inh_indices = channel_info.get('inh_indices', [])
+            print(f"  > 成功加载 {channel_info_path}。")
+            print(f"    - 找到 {len(exc_indices)} 个兴奋性通道。")
+            print(f"    - 找到 {len(inh_indices)} 个抑制性通道。")
+    except FileNotFoundError:
+        print(f"  > [警告] 未找到 'channel_info.json' (路径: {channel_info_path})。")
+        print(f"  > TCN 卷积核可视化将显示所有通道，不区分E/I。")
+    except Exception as e:
+        print(f"  > [错误] 加载 {channel_info_path} 失败: {e}")
+
 
     # 检查shape
     if X_raw.shape[0] != Y_raw.shape[0]:
@@ -130,13 +163,13 @@ def get_data_loaders(cfg, output_dir):
 
     total_steps = X_raw.shape[0]
 
-    # --- 2. 提取时间步长 (仅用于打印) ---
+    # --- 提取时间步长 (仅用于打印) ---
     timestamps = X_raw[:, 0]
     time_step_ms = np.mean(np.diff(timestamps))
     print(f"  > 检测到 {total_steps} 个时间步。")
     print(f"  > 平均时间步长: {time_step_ms:.4f} ms。")
 
-    # --- 3. 分离特征和目标 ---
+    # --- 分离特征和目标 ---
     # 输入: 通道 1 及之后 (通道 0 是时间戳)
     X_data = X_raw[:, 1:].astype(np.float32)
 
@@ -144,26 +177,47 @@ def get_data_loaders(cfg, output_dir):
     # 通道 1 是 Soma 电压
     Y_soma_raw = Y_raw[:, 1].astype(np.float32)
 
-    # 通道 2+ 是树突电压 (如果存在)
+    # --- 1. 修改：DVT 自动化检测 ---
     Y_dvt_raw = None
-    if cfg.DATA_CONFIG["DVT_PCA_COMPONENTS"] > 0:
-        if Y_raw.shape[1] > 2:
-            Y_dvt_raw = Y_raw[:, 2:].astype(np.float32)
-            print(f"  > 找到 {Y_dvt_raw.shape[1]} 个树突电压通道。")
+    # 从 config 中获取用户 *期望* 的成分数量
+    requested_pca_components = cfg.DATA_CONFIG["DVT_PCA_COMPONENTS"]
+
+    if Y_raw.shape[1] > 2:
+        # 1. 自动检测到数据 (Y_raw[:, 0]=time, [:, 1]=soma, [:, 2+]=dvt)
+        print(f"  > 自动检测到 {Y_raw.shape[1] - 2} 个树突电压通道。")
+        Y_dvt_raw = Y_raw[:, 2:].astype(np.float32)
+
+        if requested_pca_components <= 0:
+            # 2. 用户在 config.py 中设置了 0，但数据存在
+            print(f"  > [警告] 检测到树突数据，但 config.py 中的 DVT_PCA_COMPONENTS = 0。")
+            print(f"  > 将忽略树突数据。如需处理，请在 config.py 中设置 DVT_PCA_COMPONENTS > 0。")
+            cfg.DATA_CONFIG["DVT_PCA_COMPONENTS"] = 0 # 确保为 0
+            Y_dvt_raw = None # 丢弃数据
         else:
-            print("  > 警告: DVT_PCA_COMPONENTS > 0 但未找到树突通道。将忽略DVT。")
-            cfg.DATA_CONFIG["DVT_PCA_COMPONENTS"] = 0
+            # 3. 用户设置了 > 0，数据也存在 (理想情况)
+            print(f"  > 将使用 config.py 中设置的 {requested_pca_components} 个PCA成分。")
+            # cfg.DATA_CONFIG["DVT_PCA_COMPONENTS"] 保持用户设置的值不变
+            pass
+    else:
+        # 4. 未检测到数据
+        if requested_pca_components > 0:
+            # 5. 用户设置了 > 0，但数据不存在
+            print(f"  > [警告] config.py 中 DVT_PCA_COMPONENTS = {requested_pca_components}，但未在数据中找到树突通道。")
+
+        # 自动将 *有效* 成分数量设为 0
+        cfg.DATA_CONFIG["DVT_PCA_COMPONENTS"] = 0
+        # --- 修改结束 ---
 
     del X_raw, Y_raw # 释放内存
 
-    # --- 4. 生成脉冲目标 ---
+    # --- 生成脉冲目标 ---
     Y_spike = find_local_maxima_with_threshold(
         Y_soma_raw, cfg.DATA_CONFIG["SPIKE_THRESHOLD_MV"]
     )
     # 调整shape为 (T, 1)
     Y_spike = Y_spike.reshape(-1, 1)
 
-    # --- 5. 数据划分 (6:1:3) ---
+    # --- 数据划分 (6:1:3) ---
     print("--- 步骤 2: 划分数据 (6:1:3) ---")
     split_ratio = cfg.DATA_CONFIG["DATA_SPLIT_RATIO"]
     train_size = int(total_steps * split_ratio[0])
@@ -178,6 +232,7 @@ def get_data_loaders(cfg, output_dir):
     Y_soma_val, Y_soma_test = Y_soma_temp[:val_size], Y_soma_temp[val_size:]
     Y_spike_val, Y_spike_test = Y_spike_temp[:val_size], Y_spike_temp[val_size:]
 
+    # --- 2. 修改：此处的 Y_dvt_raw 已经是 None 或者 真实数据 ---
     if Y_dvt_raw is not None:
         Y_dvt_train, Y_dvt_temp = Y_dvt_raw[:train_size], Y_dvt_raw[train_size:]
         Y_dvt_val, Y_dvt_test = Y_dvt_temp[:val_size], Y_dvt_temp[val_size:]
@@ -186,14 +241,12 @@ def get_data_loaders(cfg, output_dir):
     print(f"  > 验证集: {X_val.shape[0]} 步")
     print(f"  > 测试集: {X_test.shape[0]} 步")
 
-    # --- 6. 拟合与应用预处理 ---
+    # --- 拟合与应用预处理 ---
     # 严格复现原项目的预处理
 
     print("--- 步骤 3: 拟合与应用预处理 ---")
 
     # 6a. Soma 电压: 截断 + 减去偏置
-    # 注意：我们使用 config.py 中定义的固定偏置，以严格复现原项目。
-    # 如果想用动态均值，可以将 Y_SOMA_BIAS 设为 'auto'。
     print(f"  > 应用Soma电压截断 (阈值={cfg.DATA_CONFIG['SOMA_VOLTAGE_THRESHOLD_MV']}mV)...")
     np.clip(Y_soma_train, None, cfg.DATA_CONFIG['SOMA_VOLTAGE_THRESHOLD_MV'], out=Y_soma_train)
     np.clip(Y_soma_val, None, cfg.DATA_CONFIG['SOMA_VOLTAGE_THRESHOLD_MV'], out=Y_soma_val)
@@ -215,7 +268,9 @@ def get_data_loaders(cfg, output_dir):
     Y_soma_val = Y_soma_val.reshape(-1, 1)
     Y_soma_test = Y_soma_test.reshape(-1, 1)
 
-    # 6b. DVT (树突电压): PCA + 截断
+    # --- 3. 修改：此处的 PCA 逻辑现在是安全的 ---
+    # 它依赖于 cfg.DATA_CONFIG["DVT_PCA_COMPONENTS"]，
+    # 而这个值在前面已经被我们的自动化逻辑修正为“有效值”（0 或 用户请求的值）。
     pca_model = None
     if cfg.DATA_CONFIG["DVT_PCA_COMPONENTS"] > 0 and Y_dvt_raw is not None:
         print(f"  > 拟合PCA (n={cfg.DATA_CONFIG['DVT_PCA_COMPONENTS']})，仅使用训练集...")
@@ -235,23 +290,22 @@ def get_data_loaders(cfg, output_dir):
         np.clip(Y_dvt_val, -dvt_thresh, dvt_thresh, out=Y_dvt_val)
         np.clip(Y_dvt_test, -dvt_thresh, dvt_thresh, out=Y_dvt_test)
 
-    # --- 7. 保存标量和PCA模型 ---
+    # --- 保存标量和PCA模型 ---
     scalers = {'soma_bias': soma_bias}
     joblib.dump(scalers, os.path.join(output_dir, "data_scalers.pkl"))
     if pca_model:
         joblib.dump(pca_model, os.path.join(output_dir, "pca_model.pkl"))
 
-    # --- 8. 创建 DataLoaders ---
+    # --- 创建 DataLoaders ---
     print("--- 步骤 4: 创建 DataLoaders ---")
 
     # 训练集: 使用随机窗口采样
     train_targets = {'spike': Y_spike_train, 'soma': Y_soma_train}
+    # --- 4. 修改： 检查 Y_dvt_raw 是否存在 ---
     if Y_dvt_raw is not None:
         train_targets['dvt_pca'] = Y_dvt_train
 
     # 计算每个“子-epoch”的步数
-    # 复现原项目的 num_train_steps_per_epoch
-    # 原项目使用 100 步
     steps_per_sub_epoch = 100
 
     train_dataset = NeuronRandomWindowDataset(
@@ -274,7 +328,6 @@ def get_data_loaders(cfg, output_dir):
     )
 
     # 验证集和测试集: 返回完整数据以供评估函数处理
-    # （评估函数将处理重叠-相加逻辑）
 
     # 组装验证集
     val_targets = {'spike': Y_spike_val, 'soma': Y_soma_val}
@@ -293,13 +346,16 @@ def get_data_loaders(cfg, output_dir):
     Y_val_tensor = {k: torch.from_numpy(v).float().to(cfg.DEVICE) for k, v in val_targets.items()}
     Y_test_tensor = {k: torch.from_numpy(v).float().to(cfg.DEVICE) for k, v in test_targets.items()}
 
-    # 打包数据信息
+    # --- 打包数据信息 ---
     data_info = {
         "time_step_ms": time_step_ms,
         "input_channels": X_train.shape[1],
+        # --- 5. 修改：这里现在是“有效”通道数 (0 或 用户请求的值) ---
         "dvt_channels": cfg.DATA_CONFIG["DVT_PCA_COMPONENTS"],
         "scalers": scalers,
-        "pca_model": pca_model
+        "pca_model": pca_model,
+        "exc_indices": exc_indices,
+        "inh_indices": inh_indices
     }
 
     print("--- 数据加载完成 ---")
