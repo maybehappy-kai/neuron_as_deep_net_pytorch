@@ -305,7 +305,13 @@ def get_data_loaders(cfg, output_dir):
     if Y_dvt_raw is not None:
         train_targets['dvt_pca'] = Y_dvt_train
 
-    # --- 修改：从 config.py 中读取 STEPS_PER_SUB_EPOCH ---
+    # --- 修复第 1 步：将批次大小的定义移到 Dataset 创建之前 ---
+    # (原始位置在第 220 行)
+    # (注意: 我们在问题1中已将调度改为策略，但 data_loader 仍然
+    #  只在初始化时读取一次批次大小，这是符合预期的。)
+    batch_size = cfg.TRAIN_CONFIG["BATCH_SIZE_VALUES"][0]
+
+    # --- 原始 STEPS_PER_SUB_EPOCH 定义 (保持不变) ---
     # (移除了硬编码的 steps_per_sub_epoch = 100)
     steps_per_sub_epoch = cfg.TRAIN_CONFIG["STEPS_PER_SUB_EPOCH"]
 
@@ -313,18 +319,22 @@ def get_data_loaders(cfg, output_dir):
         X_train,
         train_targets,
         window_size=cfg.MODEL_CONFIG["INPUT_WINDOW_SIZE"],
-        steps_per_epoch=steps_per_sub_epoch * cfg.TRAIN_CONFIG["NUM_STEPS_MULTIPLIER"],
+
+        # --- 修复第 2 步：修正此行逻辑 ---
+        # 原始错误逻辑: steps_per_epoch=steps_per_sub_epoch * cfg.TRAIN_CONFIG["NUM_STEPS_MULTIPLIER"],
+        # 修正后的正确逻辑:
+        steps_per_epoch=steps_per_sub_epoch * batch_size,
+        # ---------------------------------
+
         ignore_steps_start=cfg.TRAIN_CONFIG["IGNORE_TIME_FROM_START"]
     )
 
     # 批次大小从调度中获取第一个值
-    # (注意: 我们在问题1中已将调度改为策略，但 data_loader 仍然
-    #  只在初始化时读取一次批次大小，这是符合预期的。)
-    batch_size = cfg.TRAIN_CONFIG["BATCH_SIZE_VALUES"][0]
+    # (原始第 220 行的 batch_size 定义现在已移至上方)
 
     train_loader = DataLoader(
         train_dataset,
-        batch_size=batch_size,
+        batch_size=batch_size, # (现在使用上面定义的 batch_size)
         shuffle=False, # shuffle=False 因为我们的Dataset.__getitem__已经实现了随机采样
         num_workers=4,
         pin_memory=True
