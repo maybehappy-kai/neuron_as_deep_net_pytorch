@@ -13,22 +13,20 @@ TASKS_PER_GPU = 4
 
 # --- 2. 定义参数网格 ---
 # 这是您想要运行的所有实验组合。
-# 我根据原论文图4B 和 fit_CNN.py 的示例创建了一个网格。
-# 您需要修改这里来定义完整的 137+ 次运行。
-
 PARAM_GRID = {
+    # --- 修改点 1：将 data_subdir 加入网格 ---
+    'data_subdir': ['3_4_section_dend', '3_4_section'], # 你刚转换的两个
+    # 'data_subdir': ['simple', '1ms', '3_4_section_dend', '3_4_section'], # 包含所有的4个
+
     'tcn_depth': [1, 2, 3, 4, 5, 6, 7, 8],
-    'tcn_width': [4, 8, 16, 32, 64, 128, 256],
-    'tcn_kernel_first': [16, 32, 64], # 固定第一层核大小
-    'tcn_kernel_rest': [4, 8, 16]   # 固定剩余层核大小
+    'tcn_width': [32, 64, 128, 256],
+    'tcn_kernel_first': [54], # 固定第一层核大小
+    'tcn_kernel_rest': [24]   # 固定剩余层核大小
 }
 
 # --- 3. 固定的参数 ---
-# 您要求的 --data_subdir
-DATA_SUBDIR = '1ms'
-
-# --- 修复：保持 main_run.py 为相对路径，因为父脚本将不再 chdir ---
-BASE_COMMAND = ['python', 'main_run.py', '--data_subdir', DATA_SUBDIR]
+# --- 修改点 1：移除固定的 DATA_SUBDIR，简化 BASE_COMMAND ---
+BASE_COMMAND = ['python', 'main_run.py']
 
 # --- 新增：定义日志目录 ---
 LOG_DIR = "logs_grid_search"
@@ -73,9 +71,9 @@ def main():
                 for (proc, job) in process_list:
                     if proc.poll() is not None: # 进程已结束
                         if proc.returncode == 0:
-                            print(f"[GPU {gpu_id}] 任务 {job['id']} (Depth={job['params']['tcn_depth']}, Width={job['params']['tcn_width']}) 已成功完成。")
+                            print(f"[GPU {gpu_id}] 任务 {job['id']} (Data={job['params']['data_subdir']}, Depth={job['params']['tcn_depth']}) 已成功完成。")
                         else:
-                            print(f"[GPU {gpu_id}] [警告] 任务 {job['id']} 失败，返回码: {proc.returncode}。")
+                            print(f"[GPU {gpu_id}] [警告] 任务 {job['id']} (Data={job['params']['data_subdir']}) 失败，返回码: {proc.returncode}。")
 
                         finished_gpus.append(gpu_id) # 将此 GPU ID 归还到队列
                         tasks_completed += 1
@@ -97,6 +95,8 @@ def main():
                     job = job_queue.get_nowait()
 
                     # 构建命令行
+                    # 因为 data_subdir 已经在 job['params'] 里了，
+                    # 这里的循环会自动把它加上，无需额外处理。
                     cmd = BASE_COMMAND.copy()
                     for key, value in job['params'].items():
                         cmd.append(f"--{key}")
@@ -109,8 +109,8 @@ def main():
                     print(f"[GPU {gpu_id}] 启动任务 {job['id']}/{total_tasks}: {' '.join(cmd[2:])}")
 
                     # 启动子进程
-                    # --- 修复：将日志文件路径指向子目录 ---
-                    log_filename = os.path.join(LOG_DIR, f"logs_job_{job['id']}_D{job['params']['tcn_depth']}_W{job['params']['tcn_width']}.log")
+                    # --- 修改点 2：(推荐) 更新日志文件名以包含数据集 ---
+                    log_filename = os.path.join(LOG_DIR, f"logs_job_{job['id']}_Data{job['params']['data_subdir']}_D{job['params']['tcn_depth']}_W{job['params']['tcn_width']}.log")
 
                     with open(log_filename, 'w') as log_file:
                         # --- 修复：不设置 cwd，让子进程继承父进程的 CWD (即项目根目录) ---
