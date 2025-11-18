@@ -15,11 +15,11 @@ TASKS_PER_GPU = 4
 # 这是您想要运行的所有实验组合。
 PARAM_GRID = {
     # --- 修改点 1：将 data_subdir 加入网格 ---
-    'data_subdir': ['3_4_section_dend', '3_4_section'], # 你刚转换的两个
+    'data_subdir': ['1000input_4section_768s', 'LIF', 'simple', '3_4_section', '3_4_section_dend', 'full'],
     # 'data_subdir': ['simple', '1ms', '3_4_section_dend', '3_4_section'], # 包含所有的4个
 
-    'tcn_depth': [1, 2, 3, 4, 5, 6, 7, 8],
-    'tcn_width': [32, 64, 128, 256],
+    'tcn_depth': [5, 6, 7, 8],
+    'tcn_width': [128, 256],
     'tcn_kernel_first': [54], # 固定第一层核大小
     'tcn_kernel_rest': [24]   # 固定剩余层核大小
 }

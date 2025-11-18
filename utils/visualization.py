@@ -242,109 +242,134 @@ def plot_evaluation_metrics(y_true_soma, y_pred_soma, y_true_spike, y_pred_prob_
     plt.savefig(save_path)
     plt.close(fig)
 
-# --- 3. 模型可解释性 (TCN特定) ---
-
-# --- 1. 修改函数签名 ---
 def plot_tcn_kernels(model, time_step_ms, save_path, exc_indices=None, inh_indices=None):
     """
-    可视化TCN第一层卷积核的权重。
-    如果提供了 exc_indices 和 inh_indices，将分组绘图。
-    否则，将所有通道绘制在一起。
+    可视化TCN第一层的所有卷积核。
+
+    布局 (3 x Num_Filters):
+    - Row 0: 热力图 (E/I 堆叠)
+    - Row 1: 兴奋性 (E) 平均曲线
+    - Row 2: 抑制性 (I) 平均曲线
     """
-    print("  > 正在生成TCN卷积核可视化图...")
+    print("  > 正在生成TCN所有卷积核的可视化图...")
     try:
-        # 1. 提取权重 (保持不变)
-        weights = model.network[0].conv.weight.data.cpu().numpy()
-        kernel_data = weights[0, :, :]
-        kernel_data_flipped = np.fliplr(kernel_data)
-        kernel_size = kernel_data.shape[1]
-        time_axis_ms = -np.arange(kernel_size) * time_step_ms
-
-        # 3. 确定颜色范围 (保持不变)
-        vmax = np.percentile(np.abs(kernel_data), 99)
-        vmin = -vmax
-
-        # --- 2. 检查是否提供了E/I分组 ---
+        # 1. 检查 E/I 分组是否可用
         use_grouping = (exc_indices is not None and inh_indices is not None and
                         len(exc_indices) > 0 and len(inh_indices) > 0)
 
-        if use_grouping:
-            # --- 4a. E/I 分组绘图 (原始逻辑) ---
-            print("    > 使用 E/I 分组进行绘图。")
+        if not use_grouping:
+            print("    > [警告] 未提供 E/I 分组 (channel_info.json)。")
+            print("    > 无法按要求绘制 E/I 分离图表。已跳过 TCN 可视化。")
+            return
+
+        # 2. 提取权重
+        # weights 形状: (out_channels, in_channels, kernel_size)
+        weights = model.network[0].conv.weight.data.cpu().numpy()
+        num_filters, num_channels, kernel_size = weights.shape
+        time_axis_ms = -np.arange(kernel_size) * time_step_ms
+
+        # 3. 计算全局颜色和Y轴范围
+        vmax = np.percentile(np.abs(weights), 99)
+        vmin = -vmax
+
+        all_e_means = []
+        all_i_means = []
+        all_kernels_flipped = []
+
+        for filter_idx in range(num_filters):
+            kernel_data = weights[filter_idx, :, :]
+            kernel_data_flipped = np.fliplr(kernel_data)
+            all_kernels_flipped.append(kernel_data_flipped)
+
             exc_kernels = kernel_data_flipped[exc_indices, :]
             inh_kernels = kernel_data_flipped[inh_indices, :]
 
-            fig = plt.figure(figsize=(15, 12))
-            gs = gridspec.GridSpec(2, 2, height_ratios=[2, 1])
+            all_e_means.append(exc_kernels.mean(axis=0))
+            all_i_means.append(inh_kernels.mean(axis=0))
 
-            ax_map_exc = plt.subplot(gs[0, 0])
-            ax_map_inh = plt.subplot(gs[0, 1])
-            ax_line_exc = plt.subplot(gs[1, 0])
-            ax_line_inh = plt.subplot(gs[1, 1])
+        # 计算Y轴的统一范围
+        e_min, e_max = np.min(all_e_means), np.max(all_e_means)
+        i_min, i_max = np.min(all_i_means), np.max(all_i_means)
+        e_padding = (e_max - e_min) * 0.1
+        i_padding = (i_max - i_min) * 0.1
 
-            # 热图
-            ax_map_exc.imshow(exc_kernels, aspect='auto', cmap='jet', vmin=vmin, vmax=vmax)
-            ax_map_exc.set_title("Excitatory Kernels (Filter 0)", fontsize=16)
-            ax_map_exc.set_ylabel("Synaptic Channel Index", fontsize=14)
-            ax_map_exc.set_xticklabels([])
+        e_ylim = (e_min - e_padding, e_max + e_padding)
+        i_ylim = (i_min - i_padding, i_max + i_padding)
 
-            im = ax_map_inh.imshow(inh_kernels, aspect='auto', cmap='jet', vmin=vmin, vmax=vmax)
-            ax_map_inh.set_title("Inhibitory Kernels (Filter 0)", fontsize=16)
-            ax_map_inh.set_yticklabels([])
-            ax_map_inh.set_xticklabels([])
+        # 4. 创建图表 (3行, N列)
+        # squeeze=False 确保即使 num_filters=1 时, axes 也是 2D 数组
+        fig, axes = plt.subplots(
+            3,
+            num_filters,
+            figsize=(num_filters * 4, 10), # 宽度与卷积核数量成正比
+            squeeze=False,
+            gridspec_kw={'hspace': 0.1, 'wspace': 0.1} # <--- 修正点：这里必须是 gridspec_kw
+        )
 
-            # 添加颜色条
-            fig.colorbar(im, ax=[ax_map_exc, ax_map_inh], orientation='horizontal', pad=0.05, label="Weight (A.U.)")
+        im = None # 用于颜色条
 
-            # 时间横截面图
+        for filter_idx in range(num_filters):
+            # 获取此列的3个坐标轴
+            ax_map = axes[0, filter_idx]
+            ax_line_exc = axes[1, filter_idx]
+            ax_line_inh = axes[2, filter_idx]
+
+            # 获取预先计算的数据
+            kernel_data_flipped = all_kernels_flipped[filter_idx]
+            exc_kernels = kernel_data_flipped[exc_indices, :]
+            inh_kernels = kernel_data_flipped[inh_indices, :]
+            e_mean = all_e_means[filter_idx]
+            i_mean = all_i_means[filter_idx]
+
+            # --- 绘图 1: 热力图 (E/I 堆叠) ---
+            combined_kernels = np.vstack((exc_kernels, inh_kernels))
+            im = ax_map.imshow(combined_kernels, aspect='auto', cmap='jet', vmin=vmin, vmax=vmax)
+
+            # 在 E 和 I 之间画一条分割线
+            ax_map.axhline(y=len(exc_indices)-0.5, color='white', linestyle='--', linewidth=1.5)
+
+            ax_map.set_title(f"Filter {filter_idx}", fontsize=12)
+            ax_map.set_xticks([]) # 隐藏顶部图的X轴
+            ax_map.set_yticks([len(exc_indices)//2, len(exc_indices) + len(inh_indices)//2])
+            ax_map.set_yticklabels(['E', 'I'])
+
+            # --- 绘图 2: 兴奋性 (E) 曲线 ---
             ax_line_exc.plot(time_axis_ms, exc_kernels.T, 'r', alpha=0.05)
-            ax_line_exc.plot(time_axis_ms, exc_kernels.mean(axis=0), 'r', linewidth=2, label='Mean Excitation')
-            ax_line_exc.set_xlabel("Time before t0 (ms)", fontsize=14)
-            ax_line_exc.set_ylabel("Weight (A.U.)", fontsize=14)
-            ax_line_exc.legend()
+            ax_line_exc.plot(time_axis_ms, e_mean, 'r', linewidth=2)
+            ax_line_exc.set_ylim(e_ylim)
+            ax_line_exc.set_ylabel("E-Weight", fontsize=10)
             ax_line_exc.set_xlim(time_axis_ms.min(), time_axis_ms.max())
             ax_line_exc.spines['top'].set_visible(False)
             ax_line_exc.spines['right'].set_visible(False)
+            ax_line_exc.set_xticks([]) # 隐藏中间图的X轴
 
+            # --- 绘图 3: 抑制性 (I) 曲线 ---
             ax_line_inh.plot(time_axis_ms, inh_kernels.T, 'b', alpha=0.05)
-            ax_line_inh.plot(time_axis_ms, inh_kernels.mean(axis=0), 'b', linewidth=2, label='Mean Inhibition')
-            ax_line_inh.set_xlabel("Time before t0 (ms)", fontsize=14)
-            ax_line_inh.set_yticklabels([])
+            ax_line_inh.plot(time_axis_ms, i_mean, 'b', linewidth=2)
+            ax_line_inh.set_ylim(i_ylim)
+            ax_line_inh.set_ylabel("I-Weight", fontsize=10)
+            ax_line_inh.set_xlabel("Time before t0 (ms)", fontsize=10)
             ax_line_inh.set_xlim(time_axis_ms.min(), time_axis_ms.max())
-            ax_line_inh.legend()
             ax_line_inh.spines['top'].set_visible(False)
             ax_line_inh.spines['right'].set_visible(False)
-            ax_line_inh.spines['left'].set_visible(False)
 
-        else:
-            # --- 4b. 不分组绘图 (新逻辑) ---
-            print("    > 未提供 E/I 分组，将所有通道绘制在一起。")
-            all_kernels = kernel_data_flipped
+            # --- 清理非第一列的Y轴标签 ---
+            if filter_idx > 0:
+                ax_map.set_yticklabels([])
+                ax_line_exc.set_yticklabels([])
+                ax_line_inh.set_yticklabels([])
+                ax_line_exc.set_ylabel("")
+                ax_line_inh.set_ylabel("")
 
-            fig, (ax_map_all, ax_line_all) = plt.subplots(1, 2, figsize=(15, 6))
+        # 5. 添加一个全局颜色条
+        fig.colorbar(im, ax=axes[0, -1], orientation='vertical', pad=0.01, aspect=30, label="Weight (A.U.)")
 
-            # 热图
-            im = ax_map_all.imshow(all_kernels, aspect='auto', cmap='jet', vmin=vmin, vmax=vmax)
-            ax_map_all.set_title("All Kernels (Filter 0)", fontsize=16)
-            ax_map_all.set_ylabel("Synaptic Channel Index", fontsize=14)
-            ax_map_all.set_xlabel("Time before t0 (ms)", fontsize=14)
+        fig.suptitle("TCN Layer 0 Kernels (E/I Split)", fontsize=20, y=1.02)
 
-            # 添加颜色条
-            fig.colorbar(im, ax=ax_map_all, orientation='vertical', pad=0.03, label="Weight (A.U.)")
+        # 使用 tight_layout 调整间距
+        plt.tight_layout(rect=[0, 0, 1, 0.98])
 
-            # 时间横截面图
-            ax_line_all.plot(time_axis_ms, all_kernels.T, 'k', alpha=0.05)
-            ax_line_all.plot(time_axis_ms, all_kernels.mean(axis=0), 'k', linewidth=2, label='Mean (All Channels)')
-            ax_line_all.set_xlabel("Time before t0 (ms)", fontsize=14)
-            ax_line_all.set_ylabel("Weight (A.U.)", fontsize=14)
-            ax_line_all.legend()
-            ax_line_all.set_xlim(time_axis_ms.min(), time_axis_ms.max())
-            ax_line_all.spines['top'].set_visible(False)
-            ax_line_all.spines['right'].set_visible(False)
-
-        # --- 5. 保存 ---
-        plt.tight_layout()
-        plt.savefig(save_path)
+        plt.savefig(save_path, bbox_inches='tight')
         plt.close(fig)
 
     except Exception as e:

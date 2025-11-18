@@ -84,7 +84,10 @@ def predict_full_sequence(model, X_full, cfg):
     if start_indices[-1] + window_size < total_len:
         start_indices.append(total_len - window_size)
 
-    for i in tqdm(range(0, len(start_indices), batch_size), desc="  > 评估中", leave=False):
+    for i in range(0, len(start_indices), batch_size): # 移除了 tqdm
+        if (i // batch_size) % 50 == 0: # 可以选择性地保留一个简单的进度打印
+            print(f"    > 评估进度: {i*batch_size}/{len(start_indices)*batch_size} 步...")
+
         batch_starts = start_indices[i:i+batch_size]
 
         # (B, C, T)

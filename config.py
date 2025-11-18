@@ -63,7 +63,7 @@ MODEL_CONFIG = {
 
 # --- 4. 训练参数 ---
 # 严格复现原项目的学习调度
-NUM_EPOCHS = 250 # "外层" epoch 数量 (现在可以灵活设置)
+NUM_EPOCHS = 1 # "外层" epoch 数量 (现在可以灵活设置)
 NUM_STEPS_MULTIPLIER = 10 # 每个 "外层" epoch 包含的 "子-epoch" 数量
 
 # --- 学习率调度 (新) ---

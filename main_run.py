@@ -403,9 +403,9 @@ def run_visualizations(model, test_data, test_results, data_info, cfg, plots_dir
             exc_indices=data_info["exc_indices"],
             inh_indices=data_info["inh_indices"],
             time_step_ms=time_step_ms,
-            save_path=os.path.join(plots_dir, "tcn_kernels.png")
+            save_path=os.path.join(plots_dir, "tcn_kernels.svg") # <-- 修改
         )
-        print(f"  > 已保存: tcn_kernels.png")
+        print(f"  > 已保存: tcn_kernels.svg") # <-- 修改
 
     # --- 5. 绘制完整数据集轨迹 (新) ---
     if full_data:

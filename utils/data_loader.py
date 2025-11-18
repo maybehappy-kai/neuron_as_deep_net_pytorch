@@ -177,27 +177,35 @@ def get_data_loaders(cfg, output_dir):
     # 通道 1 是 Soma 电压
     Y_soma_raw = Y_raw[:, 1].astype(np.float32)
 
-    # --- 1. 修改：DVT 自动化检测 ---
+    # --- 1. 修改：DVT 自动化检测与自适应策略 ---
     Y_dvt_raw = None
-    # 从 config 中获取用户 *期望* 的成分数量
+    # 从 config 中获取用户 *期望* 的成分数量 (通常为 20)
     requested_pca_components = cfg.DATA_CONFIG["DVT_PCA_COMPONENTS"]
 
     if Y_raw.shape[1] > 2:
         # 1. 自动检测到数据 (Y_raw[:, 0]=time, [:, 1]=soma, [:, 2+]=dvt)
-        print(f"  > 自动检测到 {Y_raw.shape[1] - 2} 个树突电压通道。")
+        num_dvt_actual = Y_raw.shape[1] - 2
+        print(f"  > 自动检测到 {num_dvt_actual} 个树突电压通道。")
         Y_dvt_raw = Y_raw[:, 2:].astype(np.float32)
 
         if requested_pca_components <= 0:
             # 2. 用户在 config.py 中设置了 0，但数据存在
             print(f"  > [警告] 检测到树突数据，但 config.py 中的 DVT_PCA_COMPONENTS = 0。")
-            print(f"  > 将忽略树突数据。如需处理，请在 config.py 中设置 DVT_PCA_COMPONENTS > 0。")
+            print(f"  > 将忽略树突数据。")
             cfg.DATA_CONFIG["DVT_PCA_COMPONENTS"] = 0 # 确保为 0
             Y_dvt_raw = None # 丢弃数据
         else:
-            # 3. 用户设置了 > 0，数据也存在 (理想情况)
-            print(f"  > 将使用 config.py 中设置的 {requested_pca_components} 个PCA成分。")
-            # cfg.DATA_CONFIG["DVT_PCA_COMPONENTS"] 保持用户设置的值不变
-            pass
+            # 3. 用户设置了 > 0，数据也存在
+            # --- 关键修改：不足 20 (requested) 时，自动下调维度，但仍进行 PCA ---
+            if num_dvt_actual < requested_pca_components:
+                print(f"  > [自动调整] 实际通道数 ({num_dvt_actual}) 小于配置的 PCA 维度 ({requested_pca_components})。")
+                print(f"  > 将 PCA 维度调整为 {num_dvt_actual} (以便执行全秩 PCA + 白化)。")
+                # 更新配置，确保后续 PCA 逻辑使用正确的维度
+                cfg.DATA_CONFIG["DVT_PCA_COMPONENTS"] = num_dvt_actual
+            else:
+                print(f"  > 实际通道数 ({num_dvt_actual}) 充足。将执行标准 PCA 降维至 {requested_pca_components}。")
+            # --- 修改结束 ---
+
     else:
         # 4. 未检测到数据
         if requested_pca_components > 0:
@@ -206,7 +214,6 @@ def get_data_loaders(cfg, output_dir):
 
         # 自动将 *有效* 成分数量设为 0
         cfg.DATA_CONFIG["DVT_PCA_COMPONENTS"] = 0
-        # --- 修改结束 ---
 
     del X_raw, Y_raw # 释放内存
 
@@ -266,12 +273,17 @@ def get_data_loaders(cfg, output_dir):
     # 调整shape为 (T, 1)
     Y_soma_train = Y_soma_train.reshape(-1, 1)
     Y_soma_val = Y_soma_val.reshape(-1, 1)
+    Y_soma_test -= soma_bias
+
+    # 调整shape为 (T, 1)
+    Y_soma_train = Y_soma_train.reshape(-1, 1)
+    Y_soma_val = Y_soma_val.reshape(-1, 1)
     Y_soma_test = Y_soma_test.reshape(-1, 1)
 
-    # --- 3. 修改：此处的 PCA 逻辑现在是安全的 ---
-    # 它依赖于 cfg.DATA_CONFIG["DVT_PCA_COMPONENTS"]，
-    # 而这个值在前面已经被我们的自动化逻辑修正为“有效值”（0 或 用户请求的值）。
+    # --- 3. 修改：只要 PCA 维度 > 0 且数据存在，始终应用 PCA ---
     pca_model = None
+
+    # 这里的判断条件修改了：不再检查 should_apply_pca
     if cfg.DATA_CONFIG["DVT_PCA_COMPONENTS"] > 0 and Y_dvt_raw is not None:
         print(f"  > 拟合PCA (n={cfg.DATA_CONFIG['DVT_PCA_COMPONENTS']})，仅使用训练集...")
         pca_model = PCA(n_components=cfg.DATA_CONFIG["DVT_PCA_COMPONENTS"], whiten=True)
@@ -285,7 +297,7 @@ def get_data_loaders(cfg, output_dir):
 
         # 应用截断
         dvt_thresh = cfg.DATA_CONFIG["DVT_THRESHOLD"]
-        print(f"  > 应用DVT截断 (阈值= +/- {dvt_thresh})...")
+        print(f"  > 应用PCA分量截断 (阈值= +/- {dvt_thresh})...")
         np.clip(Y_dvt_train, -dvt_thresh, dvt_thresh, out=Y_dvt_train)
         np.clip(Y_dvt_val, -dvt_thresh, dvt_thresh, out=Y_dvt_val)
         np.clip(Y_dvt_test, -dvt_thresh, dvt_thresh, out=Y_dvt_test)

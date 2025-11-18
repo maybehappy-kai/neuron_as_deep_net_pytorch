@@ -55,7 +55,8 @@ def train_one_epoch(model, loader, optimizer, loss_fn_spike, loss_fn_soma, loss_
 
     # Keras fit_generator(steps_per_epoch=100) -> 对应 100 步
     # 我们的 loader 长度被 data_loader.py 设置为 100
-    progress_bar = tqdm(loader, desc=f"  > Sub-Epoch {sub_epoch_idx+1}/{config.TRAIN_CONFIG['NUM_STEPS_MULTIPLIER']}", leave=False)
+    # 移除了 tqdm 以减少日志冗余
+    progress_bar = loader
 
     for batch_X, batch_Y_dict in progress_bar:
         # B, C, T
